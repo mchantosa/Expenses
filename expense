@@ -1,0 +1,207 @@
+#!/usr/bin/env node
+const PROCESS = require('process');
+const { Client } = require("pg");
+const prompt = require('prompt');
+prompt.start();
+
+
+function logAndExit(error) {
+  console.log(error);
+  process.exit(1);
+}
+
+class ExpenseData {
+
+  constructor() {
+    this.client = new Client({ 
+      database: 'expenses' 
+    });
+  }
+
+  async addExpense(queryValues){
+    await this.client.connect().catch(error => logAndExit(error));
+    await this.setup_schema().catch(error => logAndExit(error));
+
+    if(queryValues[0]) queryValues[0] = parseFloat(queryValues[0]);
+
+    if(queryValues.length > 2){
+      const queryStatement = `INSERT INTO expenses (amount, memo, created_on) VALUES ($1, $2, $3)`;
+      await this.client.query(queryStatement, queryValues)
+        .catch(error => logAndExit(error));
+    } else if(queryValues.length == 2){
+      const queryStatement = `INSERT INTO expenses (amount, memo) VALUES ($1, $2)`;
+      await this.client.query(queryStatement, queryValues)
+        .catch(error => logAndExit(error));
+    } else {
+      console.log('You must provide an amount and memo.')
+    }
+
+    await this.client.end().catch(error => logAndExit(error));
+  }
+
+  async searchExpenses(queryValues){
+    await this.client.connect().catch(error => logAndExit(error));
+    await this.setup_schema().catch(error => logAndExit(error));
+
+    const queryStatement = `SELECT * FROM expenses WHERE memo ILIKE $1`;
+    let data = await this.client.query(queryStatement,  [`%${queryValues[0]}%`])
+      .catch(error => logAndExit(error));
+
+    this.displayCount(data.rowCount);
+    if(data.rowCount > 0){
+      this.displayExpenses(data);
+      this.displayTotal(data);
+    }
+
+    await this.client.end().catch(error => logAndExit(error));
+  }
+
+  async listExpenses(){
+    await this.client.connect().catch(error => logAndExit(error));
+    await this.setup_schema().catch(error => logAndExit(error));
+
+    let data = await this.client.query('SELECT * FROM expenses ORDER BY created_on ASC')
+      .catch(error => logAndExit(error));
+
+    this.displayCount(data.rowCount)
+    if(data.rowCount > 0){
+      this.displayExpenses(data);
+      this.displayTotal(data);
+    }
+
+    await this.client.end().catch(error => logAndExit(error));
+  }
+
+  displayExpenses(query){
+    query.rows.forEach(row => {
+      let log = [`${row.id}`.padStart(3),
+      row.created_on.toDateString().padStart(10),
+      row.amount.padStart(12),
+      row.memo];
+      console.log(log.join('  |  '))
+    });
+  }
+
+  displayCount(rowCount){
+    if(rowCount === 0){
+      console.log('There are no expenses.');
+    } else {
+      const referentialVerb = (rowCount > 1) ? 'are' : 'is';
+      const isPlural = (rowCount > 1) ? 'expenses' : 'expense';
+      console.log(`There ${referentialVerb} ${rowCount} ${isPlural}.`);
+    }
+  }
+
+  displayTotal(query){
+    const total = query.rows.reduce((a, b) => a + parseFloat(b.amount), 0).toFixed(2);
+    console.log(`${'-'.repeat(60)}`);
+    console.log(`Total${total.toString().padStart(3+15+12+10-5)}`);
+  }
+
+  async deleteExpense(queryValues){
+    await this.client.connect().catch(error => logAndExit(error));
+    await this.setup_schema().catch(error => logAndExit(error));
+
+    const queryStatement = `SELECT * FROM expenses WHERE id = $1`;
+    const queryId = await this.client.query(queryStatement, queryValues)
+      .catch(error => logAndExit(error));
+
+    if(queryId.rows.length > 0){
+      const queryStatementRemoveId = `DELETE FROM expenses WHERE id = $1`;
+      await this.client.query(queryStatementRemoveId, queryValues)
+        .catch(error => logAndExit(error));
+      console.log('The following expense has been deleted:');
+      this.displayExpenses(queryId);
+    } else {
+      console.log(`There is no expense with the id '${queryValues[0]}'.`)
+    }
+
+    await this.client.end().catch(error => logAndExit(error));
+  }
+
+  async deleteAllExpenses(){
+    await this.client.connect().catch(error => logAndExit(error));
+    await this.setup_schema().catch(error => logAndExit(error));
+
+    const userConsentMsg = 'This will remove all expenses. Are you sure? (enter y to confirm)';
+    const userConsentFeedback = await prompt.get([userConsentMsg]).catch(error => logAndExit(error));
+    if(userConsentFeedback[userConsentMsg] === 'y'){
+      const queryStatement = `DELETE FROM expenses`;
+      await this.client.query(queryStatement).catch(error => logAndExit(error));
+      console.log('All expenses have been deleted.')
+    }
+
+    await this.client.end().catch(error => logAndExit(error));
+  }
+
+  async setup_schema(){
+    const queryStatement = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'expenses'`;
+    let tableCreationQuery = `CREATE TABLE expenses (
+      id serial PRIMARY KEY,
+      amount decimal(6,2) NOT NULL,
+      memo text NOT NULL,
+      created_on date NOT NULL DEFAULT NOW(),
+      CHECK(amount >= 0.01)
+    )`;
+    const query = await this.client.query(queryStatement)
+      .catch(error => logAndExit(error));
+    if(query.rows[0].count === '0'){
+      await this.client.query(tableCreationQuery)
+        .catch(error => logAndExit(error));
+    }
+  }
+}
+
+class CLI {
+
+  constructor() {
+    this.expenseData = new ExpenseData();
+  }
+
+  static HELP() {
+    return `An expense recording system
+
+Commands:
+
+add AMOUNT MEMO [DATE] - record a new expense
+clear - delete all expenses
+list - list all expenses
+delete NUMBER - remove expense with id NUMBER
+search QUERY - list expenses with a matching memo field`;
+  }
+
+  displayHelp(){
+    console.log(CLI.HELP())
+  }
+
+  run(processArr){
+    const command = processArr[2];  
+    const args = processArr.slice(3);
+
+    switch (command) {
+      case 'list':
+        this.expenseData.listExpenses();
+        break;
+      case 'add':
+        this.expenseData.addExpense(args);
+        break;
+      case 'search':
+        this.expenseData.searchExpenses(args);
+        break;
+      case 'delete':
+        this.expenseData.deleteExpense(args);
+        break;
+      case 'clear':
+        this.expenseData.deleteAllExpenses();
+        break;
+      default:
+        this.displayHelp();
+    }
+  }
+}
+
+const cli = new CLI();
+cli.run(PROCESS.argv);
+
+
+
